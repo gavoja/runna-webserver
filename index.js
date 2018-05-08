@@ -16,6 +16,9 @@ const INJECT = `
 
 class Server {
   init (args) {
+    const version = require('./package.json').version
+    console.log(`Runna webserver version ${version}.`)
+
     this.hostname = args.hostname || 'localhost'
     this.port = args.port || 8000
     this.cwd = args.cwd ? path.join(process.cwd(), args.cwd) : process.cwd()
@@ -79,7 +82,7 @@ class Server {
     this.app
       .listen(this.port, this.hostname, () => {
         let host = `${this.hostname}:${this.port}`
-        console.log(`Listening at ${host} (${this.cwd}) ...`)
+        console.log(`Listening at ${host} (${this.cwd})...`)
 
         // Start the websocket server.
         this.wss = new WebSocket.Server({
