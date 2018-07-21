@@ -22,11 +22,13 @@ class Server {
     this.hostname = args.hostname || 'localhost'
     this.port = args.port || 8000
     this.cwd = args.cwd ? path.join(process.cwd(), args.cwd) : process.cwd()
+    this.auth = args.auth || null
     this.app = args.app || express()
   }
 
   serve (callback) {
     this.app
+      .use(this.authorize.bind(this))
       .use(`/${STATIC_FRAGMENT}`, express.static(STATIC_PATH))
       .use(`/\\+reload`, (req, res) => {
         res.end()
@@ -38,8 +40,8 @@ class Server {
         process.exit()
       })
       .use('/', (req, res) => {
-        let localPath = path.join(this.cwd, req.path.endsWith('/') ? req.path + 'index.html' : req.path)
-        let ext = path.extname(localPath)
+        const localPath = path.join(this.cwd, req.path.endsWith('/') ? req.path + 'index.html' : req.path)
+        const ext = path.extname(localPath)
 
         // Serve asset.
         if (ext !== '.html') {
@@ -60,6 +62,21 @@ class Server {
     this.listen(callback)
   }
 
+  authorize (req, res, next) {
+    if (!this.auth) {
+      next()
+    }
+
+    const b64auth = (req.headers.authorization || '').split(' ').pop()
+    const provided = Buffer.from(b64auth, 'base64').toString()
+    if (this.auth === provided) {
+      return next() // Access granted.
+    }
+
+    res.set('WWW-Authenticate', 'Basic realm="401"')
+    res.status(401).send('Access denied.')
+  }
+
   setContentType (res, ext) {
     let type = mime.lookup(ext) || 'text/plain'
     res.setHeader('content-type', type)
@@ -72,8 +89,8 @@ class Server {
       if (err) {
         this.setContentType(res, '.txt').status('500').send(`Error: ${err.toString()}`)
       }
-      let html = filelist(this.cwd)
-      data = data.replace('DATA', html)
+      const html = filelist(this.cwd)
+      data = data.replace('$DATA', html)
       this.setContentType(res, '.html').status('404').send(data + INJECT)
     })
   }
@@ -81,7 +98,7 @@ class Server {
   listen (callback) {
     this.app
       .listen(this.port, this.hostname, () => {
-        let host = `${this.hostname}:${this.port}`
+        const host = `${this.hostname}:${this.port}`
         console.log(`Listening at ${host} (${this.cwd})...`)
 
         // Start the websocket server.
@@ -113,7 +130,7 @@ class Server {
   }
 
   remoteReload () {
-    let options = {host: this.hostname, port: this.port, path: '/+reload', method: 'GET'}
+    const options = {host: this.hostname, port: this.port, path: '/+reload', method: 'GET'}
     console.log(`Triggering reload to ${this.hostname}:${this.port}.`)
     http.get(options, res => {
       // Empty.
@@ -121,7 +138,7 @@ class Server {
   }
 
   remoteExit () {
-    let options = {host: this.hostname, port: this.port, path: '/+exit'}
+    const options = {host: this.hostname, port: this.port, path: '/+exit'}
     console.log(`Triggering exit to ${this.hostname}:${this.port}.`)
     http.get(options, res => {
       // Empty.
@@ -133,8 +150,8 @@ class Server {
   }
 
   main () {
-    let args = minimist(process.argv.slice(2))
-    this.init({hostname: args.h, port: args.p, cwd: args.w})
+    const args = minimist(process.argv.slice(2))
+    this.init({hostname: args.h, port: args.p, cwd: args.w, auth: args.a})
 
     if (args.r) {
       return this.remoteReload()
@@ -149,7 +166,7 @@ class Server {
 }
 
 if (require.main === module) {
-  let server = new Server()
+  const server = new Server()
   server.main()
 }
 
