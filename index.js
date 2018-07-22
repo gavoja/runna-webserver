@@ -28,7 +28,7 @@ class Server {
 
   serve (callback) {
     this.app
-      .use(this.authorize.bind(this))
+      .use(this.basicAuth.bind(this))
       .use(`/${STATIC_FRAGMENT}`, express.static(STATIC_PATH))
       .use(`/\\+reload`, (req, res) => {
         res.end()
@@ -62,9 +62,9 @@ class Server {
     this.listen(callback)
   }
 
-  authorize (req, res, next) {
+  basicAuth (req, res, next) {
     if (!this.auth) {
-      next()
+      return next()
     }
 
     const b64auth = (req.headers.authorization || '').split(' ').pop()
