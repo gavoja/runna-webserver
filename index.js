@@ -5,141 +5,132 @@ const express = require('express')
 const filelist = require('./lib/filelist')
 const fs = require('fs')
 const http = require('http')
-const mime = require('mime-types')
 const path = require('path')
 const WebSocket = require('ws')
 
 const STATIC_PATH = path.join(__dirname, 'static')
-const STATIC_FRAGMENT = '__static'
+const STATIC_FRAGMENT = '_runnawebserver_'
 const INJECT = `
 <script src="/${STATIC_FRAGMENT}/reload.js"></script>`
 
 class Server {
-  init (args) {
+  getApp (auth) {
+    const app = express()
+    app.use((req, res, next) => {
+      if (!auth) {
+        return next()
+      }
+
+      const b64auth = (req.headers.authorization || '').split(' ').pop()
+      const provided = Buffer.from(b64auth, 'base64').toString()
+      if (auth === provided) {
+        return next() // Access granted.
+      }
+
+      res.set('WWW-Authenticate', 'Basic realm="401"')
+      res.status(401).send('Access denied.')
+    })
+    app.use(`/${STATIC_FRAGMENT}`, express.static(STATIC_PATH))
+    app.use(`/\\+reload`, (req, res) => {
+      res.end()
+      this.reloadClients(app)
+    })
+    app.use('/\\+exit', (req, res) => {
+      console.log('Shutting down.')
+      res.end()
+      process.exit()
+    })
+
+    return app
+  }
+
+  serve (app, hostname, port, cwd, callback) {
     const version = require('./package.json').version
     console.log(`Runna webserver version ${version}.`)
 
-    this.hostname = args.hostname || 'localhost'
-    this.port = args.port || 8000
-    this.cwd = args.cwd ? path.join(process.cwd(), args.cwd) : process.cwd()
-    this.auth = args.auth || null
-    this.app = args.app || express()
-  }
+    app.use('/', (req, res) => {
+      const localPath = path.join(cwd, req.path.endsWith('/') ? req.path + 'index.html' : req.path)
+      if (!fs.existsSync(localPath)) {
+        return this.handleError(cwd, req, res)
+      }
 
-  serve (callback) {
-    this.app
-      .use(this.basicAuth.bind(this))
-      .use(`/${STATIC_FRAGMENT}`, express.static(STATIC_PATH))
-      .use(`/\\+reload`, (req, res) => {
-        res.end()
-        this.reloadClients()
-      })
-      .use('/\\+exit', (req, res) => {
-        console.log('Shutting down.')
-        res.end()
-        process.exit()
-      })
-      .use('/', (req, res) => {
-        const localPath = path.join(this.cwd, req.path.endsWith('/') ? req.path + 'index.html' : req.path)
-        const ext = path.extname(localPath)
+      // Serve static file.
+      if (!localPath.endsWith('.html')) {
+        return res.sendFile(localPath)
+      }
 
-        // Serve asset.
-        if (ext !== '.html') {
-          return res.sendFile(localPath)
+      // Serve the HTML file + JavaScript to handle reloads.
+      fs.readFile(localPath, 'utf8', (err, data) => {
+        if (err) {
+          return console.error(err)
         }
 
-        // Serve the HTML file.
-        fs.readFile(localPath, 'utf8', (err, data) => {
-          if (err) {
-            err.localPath = localPath
-            return this.handleError(req, res, err)
-          }
-
-          this.setContentType(res, ext).send(data + INJECT)
-        })
+        res.setHeader('content-type', 'text/html')
+        res.send(data + INJECT)
       })
+    })
 
-    this.listen(callback)
+    this.listen(app, hostname, port, cwd, callback)
   }
 
-  basicAuth (req, res, next) {
-    if (!this.auth) {
-      return next()
-    }
-
-    const b64auth = (req.headers.authorization || '').split(' ').pop()
-    const provided = Buffer.from(b64auth, 'base64').toString()
-    if (this.auth === provided) {
-      return next() // Access granted.
-    }
-
-    res.set('WWW-Authenticate', 'Basic realm="401"')
-    res.status(401).send('Access denied.')
-  }
-
-  setContentType (res, ext) {
-    let type = mime.lookup(ext) || 'text/plain'
-    res.setHeader('content-type', type)
-    return res
-  }
-
-  handleError (req, res, err) {
+  handleError (cwd, req, res) {
     // In case of 404 show the HTML file list.
     fs.readFile(path.join(STATIC_PATH, 'index.html'), 'utf-8', (err, data) => {
       if (err) {
-        this.setContentType(res, '.txt').status('500').send(`Error: ${err.toString()}`)
+        return this.setContentType(res, '.txt').status('500').send(`Error: ${err.toString()}`)
       }
-      const html = filelist(this.cwd)
+
+      const html = filelist(cwd)
       data = data.replace('$DATA', html)
-      this.setContentType(res, '.html').status('404').send(data + INJECT)
+      res.setHeader('content-type', 'text/html')
+      res.status('404').send(data + INJECT)
     })
   }
 
-  listen (callback) {
-    this.app
-      .listen(this.port, this.hostname, () => {
-        const host = `${this.hostname}:${this.port}`
-        console.log(`Listening at ${host} (${this.cwd})...`)
+  listen (app, hostname, port, cwd, callback) {
+    app.on('error', err => {
+      if (err.message.indexOf('EADDRINUSE') !== -1) {
+        console.log(`Unable to start server on port ${port}.`)
+      }
+    })
+    app.listen(port, hostname, () => {
+      const host = `${hostname}:${port}`
+      console.log(`Listening at ${host} (${cwd})...`)
 
-        // Start the websocket server.
-        this.wss = new WebSocket.Server({
-          host: this.hostname,
-          port: this.port + 1
-        })
+      // Start the websocket server.
+      app.wss = new WebSocket.Server({
+        host: hostname,
+        port: port + 1
+      })
 
-        callback && callback()
-      })
-      .on('error', err => {
-        if (err.message.indexOf('EADDRINUSE') !== -1) {
-          console.log(`Unable to start server on port ${this.port}.`)
-        }
-      })
+      callback && callback()
+    })
   }
 
-  reloadClients () {
-    if (!this.wss) {
+  reloadClients (app) {
+    if (!app.wss) {
       return
     }
 
-    console.log(`Reloading.`)
-    this.wss.clients.forEach(client => {
+    console.log('Reloading.')
+    app.wss.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
         client.send('reload')
       }
     })
   }
 
-  remoteReload () {
-    const options = {host: this.hostname, port: this.port, path: '/+reload', method: 'GET'}
-    console.log(`Triggering reload to ${this.hostname}:${this.port}.`)
+  remoteReload (hostname, port) {
+    const options = {host: hostname, port: port, path: '/+reload', method: 'GET'}
+    console.log(`Triggering reload to ${hostname}:${port}.`)
     http.get(options, res => {
       // Empty.
     }).end()
   }
 
-  remoteExit () {
-    const options = {host: this.hostname, port: this.port, path: '/+exit'}
-    console.log(`Triggering exit to ${this.hostname}:${this.port}.`)
+  remoteExit (hostname, port) {
+    const options = {host: hostname, port: port, path: '/+exit'}
+    console.log(`Triggering exit to ${hostname}:${port}.`)
     http.get(options, res => {
       // Empty.
     }).on('error', err => {
@@ -151,17 +142,21 @@ class Server {
 
   main () {
     const args = minimist(process.argv.slice(2))
-    this.init({hostname: args.h, port: args.p, cwd: args.w, auth: args.a})
+    const hostname = args.h || 'localhost'
+    const port = args.p || 8000
+    const cwd = args.w ? path.resolve(args.w) : process.cwd()
+    const auth = args.a || null
 
     if (args.r) {
-      return this.remoteReload()
+      return this.remoteReload(hostname, port)
     }
 
     if (args.x) {
-      return this.remoteExit()
+      return this.remoteExit(hostname, port)
     }
 
-    this.serve()
+    const app = this.getApp(auth)
+    this.serve(app, hostname, port, cwd)
   }
 }
 
